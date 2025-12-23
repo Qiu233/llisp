@@ -1,5 +1,6 @@
 import LLisp.Basic
 import LLisp.Elab
+import LLisp.Quot
 
 namespace LLisp
 
@@ -92,9 +93,29 @@ partial def eval : LexSExpr → EvalM Value
         eval branch_false
       else
         eval branch_true
+    | .internal_symbol .cond =>
+      for b in tail do
+        match b with
+        | .list (c :: body) =>
+          let c ← eval c
+          if !c.is_false then
+            return ← eval_seq body
+        | _ => throw "`cond` expects 1 argument"
+      return Value.nil
     | .internal_symbol .cons =>
       let x :: y :: _ := tail | throw "`cons` expects 2 arguments"
       Value.cons <$> eval x <*> eval y
+    | .internal_symbol .and =>
+      let x :: y :: _ := tail | throw "`and` expects 2 arguments"
+      let x' ← eval x
+      if x'.is_false then
+        return Value.const_false
+      else
+        let y' ← eval y
+        if y'.is_false then
+          return Value.const_false
+        else
+          return Value.const_true
     | .internal_symbol .car =>
       let some x := tail[0]? | throw "`car` expects 1 argument"
       let x' ← eval x
@@ -117,6 +138,24 @@ partial def eval : LexSExpr → EvalM Value
         return Value.const_true
       else
         return Value.const_false
+    | .internal_symbol .pair? =>
+      let some x := tail[0]? | throw "`pair?` expects 1 argument"
+      let x' ← eval x
+      match x' with
+      | .cons .. => return Value.const_true
+      | _ => return Value.const_false
+    | .internal_symbol .atom? =>
+      let some x := tail[0]? | throw "`atom?` expects 1 argument"
+      let x' ← eval x
+      match x' with
+      | .cons .. => return Value.const_false
+      | _ => return Value.const_true
+    | .internal_symbol .num? =>
+      let some x := tail[0]? | throw "`num?` expects 1 argument"
+      let x' ← eval x
+      match x' with
+      | .number .. => return Value.const_true
+      | _ => return Value.const_false
     | .internal_symbol .lambda =>
       let (frame_size, args, xs) := LexSExpr.lambda! expr
       let enclosing ← getThe Frame
@@ -129,6 +168,16 @@ partial def eval : LexSExpr → EvalM Value
       set_local addr value'
       return Value.nil
     | .internal_symbol .seq => eval_seq tail
+    | .internal_symbol .error =>
+      let x :: _ := tail | throw "`error` expects 1 arguments"
+      let LexSExpr.number x := x | throw "argument of `error` must be a number"
+      throw s!"user error: {x}"
+    | .internal_symbol .else =>
+      return Value.const_true
+    | .internal_symbol .true =>
+      return Value.const_true
+    | .internal_symbol .false =>
+      return Value.const_false
     | .symbol sym addr =>
       let f ← lookup! addr
       eval' f tail
@@ -147,8 +196,152 @@ def eval_prog_core : List SExpr → ExceptT String IO Value := fun e => do
 
 def eval_prog : List SExpr → IO (Except String Value) := eval_prog_core
 
-def code := "(define a null?) (define b (lambda (x) (seq (a x)) )  ) (b '())"
+open LLisp.Quot
 
-def e := Parser.run_parse_prog code |>.toOption.get!
+def e := Sugar.desugar_list llisp_seq% { (define a null?) (define b (lambda (x) (seq (a x)) )  ) (b `()) }
 
-#eval eval_prog e
+def i := Sugar.desugar_list llisp_seq% {
+
+(defun caar (xs) (car (car xs)))
+(defun cdar (xs) (cdr (car xs)))
+(defun cddr (xs) (cdr (cdr xs)))
+(defun cddar (xs) (cdr (cdr (car xs))))
+(defun cadar (xs) (car (cdr (car xs))))
+(defun caddar (xs) (car (cdr (cdr (car xs)))))
+(defun cadddr (xs) (car (cdr (cdr (cdr xs)))))
+(defun caddr (xs) (car (cdr (cdr xs))))
+(defun cadr (xs) (car (cdr xs)))
+
+(defun lookup (x env)
+  (cond ((null? env) (error -1))
+        ((eq? x (caar env)) (cdar env))
+        (else (lookup x (cdr env)))))
+
+(defun pairlis (xs ys env)
+  (if (null? xs)
+      env
+      (cons (cons (car xs) (car ys))
+            (pairlis (cdr xs) (cdr ys) env))))
+
+(defun isvar (x) (and (pair? x) (eq? (car x) `var)))
+
+(defun evlis (exps env)
+  (if (null? exps)
+      `()
+      (cons (eval (car exps) env)
+            (evlis (cdr exps) env))))
+
+(defun evcon (clauses env)
+  (cond ((null? clauses) (error -2))
+        ((eval (caar clauses) env)
+         (eval (cadar clauses) env))
+        (else
+         (evcon (cdr clauses) env))))
+
+(defun eval (exp env)
+  (cond
+    ((num exp)
+     exp)
+
+    ((isvar exp)
+     (lookup (cadr exp) env))
+
+    ((symbol? exp)
+     (cond ((eq? exp `else) 0)
+           ((eq? exp `true) 0)
+           ((eq? exp `false) `())
+           (else (error -3))))
+
+    ((pair? exp)
+     (cond
+
+       ((symbol? (car exp))
+        (cond
+
+          ((eq? (car exp) `quote)
+           (cadr exp))
+
+          ((and (eq? (car exp) `and)
+                (pair? (cdr exp)))
+           (if (eval (cadr exp) env)
+               (if (eval (caddr exp) env)
+                   true
+                   false)
+               false))
+
+          ((and (eq? (car exp) `if)
+                (pair? (cdr exp))
+                (pair? (cddr exp)))
+           (if (eval (cadr exp) env)
+               (eval (caddr exp) env)
+               (eval (cadddr exp) env)))
+
+          ((eq? (car exp) `null?)
+           (null? (eval (cadr exp) env)))
+
+          ((eq? (car exp) `error)
+           (error (eval (cadr exp) env)))
+
+          ((eq? (car exp) `pair?)
+           (pair? (eval (cadr exp) env)))
+
+          ((eq? (car exp) `symbol?)
+           (symbol? (eval (cadr exp) env)))
+
+          ((eq? (car exp) `num?)
+           (num (eval (cadr exp) env)))
+
+          ((eq? (car exp) `atom?)
+           (atom? (eval (cadr exp) env)))
+
+          ((eq? (car exp) `eq?)
+           (eq? (eval (cadr exp) env)
+                (eval (caddr exp) env)))
+
+          ((eq? (car exp) `car)
+           (car (eval (cadr exp) env)))
+
+          ((eq? (car exp) `cdr)
+           (cdr (eval (cadr exp) env)))
+
+          ((eq? (car exp) `cons)
+           (cons (eval (cadr exp) env)
+                 (eval (caddr exp) env)))
+
+          ((eq? (car exp) `cond)
+           (evcon (cdr exp) env))
+
+          (else
+           (error -3))))
+
+       ((isvar (car exp))
+        (eval (cons (lookup (cadar exp) env)
+                     (cdr exp))
+               env))
+
+       ((and (pair? (car exp))
+             (eq? (caar exp) `lambda))
+        (define params (cadar exp))
+        (define body   (caddar exp))
+        (define args   (evlis (cdr exp) env))
+        (define env_   (pairlis params args env))
+        (eval body env_))
+
+       ((and (pair? (car exp))
+             (eq? (caar exp) `define))
+        (define vname  (cadar exp))
+        (define val    (eval (caddar exp) env))
+        (define env_   (cons (cons vname val) env))
+        (eval (cadr exp) env_))
+
+       (else
+        (error -3))))
+
+    (else
+     (error -3)
+     )))
+
+(eval `1 `())
+}
+
+#eval eval_prog i

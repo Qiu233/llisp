@@ -1,5 +1,5 @@
 import LLisp.Basic
-import LLisp.Parser
+import LLisp.Frontend
 
 namespace LLisp
 

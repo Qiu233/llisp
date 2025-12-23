@@ -38,16 +38,25 @@ elab "declare_internal_symbols%" "{" es:internal_symbol_entry,* "}" : command =>
   Command.elabCommand max'
 
 declare_internal_symbols% {
+  seq,
   quote,
-  if,
   lambda,
   define,
   cons,
   car,
   cdr,
+  if,
+  cond,
   null?,
   eq?,
-  seq
+  pair?,
+  atom?,
+  num?,
+  error,
+  else,
+  and,
+  true,
+  false
 }
 
 end
