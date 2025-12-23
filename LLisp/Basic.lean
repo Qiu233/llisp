@@ -46,12 +46,13 @@ declare_internal_symbols% {
   car,
   cdr,
   null?,
-  eq?
+  eq?,
+  seq
 }
 
 end
 
-def allInternalSymbols : List InternalSymbol := List.range INTERNAL_SYMBOL_UID_MAX |>.map InternalSymbol.of_uid
+def allInternalSymbols : List InternalSymbol := List.range (INTERNAL_SYMBOL_UID_MAX + 1) |>.map InternalSymbol.of_uid
 
 def internalSymbolTable : Std.HashMap String InternalSymbol := Std.HashMap.ofList <| allInternalSymbols.map fun x => (x.toString, x)
 

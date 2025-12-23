@@ -108,9 +108,7 @@ partial def eval : LexSExpr → EvalM Value
       let x' ← eval x
       match x' with
       | .nil => return Value.const_true
-      | _ =>
-        dbg_trace "{repr x'}"
-        return Value.const_false
+      | _ => return Value.const_false
     | .internal_symbol .eq? =>
       let x :: y :: _ := tail | throw "`eq?` expects 2 arguments"
       let x' ← eval x
@@ -130,6 +128,7 @@ partial def eval : LexSExpr → EvalM Value
       let value' ← eval value
       set_local addr value'
       return Value.nil
+    | .internal_symbol .seq => eval_seq tail
     | .symbol sym addr =>
       let f ← lookup! addr
       eval' f tail
@@ -148,7 +147,7 @@ def eval_prog_core : List SExpr → ExceptT String IO Value := fun e => do
 
 def eval_prog : List SExpr → IO (Except String Value) := eval_prog_core
 
-def code := "(define a null?) (define b (lambda (x) (a x) )  ) (a '())"
+def code := "(define a null?) (define b (lambda (x) (seq (a x)) )  ) (b '())"
 
 def e := Parser.run_parse_prog code |>.toOption.get!
 
