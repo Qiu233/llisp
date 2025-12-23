@@ -5,21 +5,21 @@ namespace LLisp
 
 namespace Elab
 
-inductive Phase where
+private inductive Phase where
   | expr
   | literal
 deriving BEq
 
-structure Scope where
+private structure Scope where
   next : Nat
   bindings : Std.HashMap String Nat
 deriving Inhabited, Repr
 
-abbrev Env := List Scope
+private abbrev Env := List Scope
 
 def Env.size! : Env → Nat := fun e => e.head!.next
 
-abbrev ElabM := ExceptT String <| StateM Symbols
+abbrev ElabM := ExceptT String <| StateRefT Symbols IO
 
 private def emptyScope : Scope := { next := 0, bindings := {} }
 private def baseEnv : Env := [emptyScope]
@@ -29,13 +29,11 @@ private def internalSymbol? (name : String) : Option InternalSymbol :=
   internalSymbolTable[name]?
 
 private def internSymbol (name : String) : ElabM Symbol := do
-  let s ← get
-  if let some sym := s.symbols[name]? then
-    return sym
-  let uid := s.next_uid
-  let sym : Symbol := { name := name, uid }
-  set { s with symbols := s.symbols.insert name sym, next_uid := uid + 1 }
-  return sym
+  modifyGet fun s =>
+    if let some sym := s.symbols[name]? then
+      (sym, s)
+    else
+      s.push name
 
 private def lookupAddr (env : Env) (name : String) : Option LexAddr := Id.run do
   let mut depth := 0
@@ -162,28 +160,11 @@ private partial def mapInMode (env : Env) (phase : Phase) : List SExpr → ElabM
 
 end
 
-def elaborate (program : List SExpr) : Except String (List LexSExpr × Env × Symbols) := do
-  let initSymbols : Symbols := { symbols := allInternalSymbols', next_uid := INTERNAL_SYMBOL_UID_MAX + 1 }
-  let (r, s) := (elabSeq baseEnv program).run initSymbols
-  let l ← Prod.fst <$> r
-  let r ← Prod.snd <$> r
-  return (l, r, s)
+def elaborate (program : List SExpr) : ExceptT String IO (List LexSExpr × Nat × Symbols) := do
+  let initSymbols : Symbols := Symbols.new
+  let (r, s) ← StateRefT'.run (elabSeq baseEnv program) initSymbols
+  return (r.fst, r.snd.size!, s)
 
 end Elab
-
-def code := "(define a null?) (define b (lambda (x) (a x) )  ) (a '())"
-
-def e := Parser.run_parse_prog code |>.toOption.get!
-
-def r := Elab.elaborate e |>.toOption.get!
-
-
-
-#eval e
-#eval r
-
-#eval LLisp.eval_seq r.1 |>.run' { parent? := none, locals := Array.replicate r.2.1.size! Value.nil } |>.run' r.2.2
-
-
 
 end LLisp
