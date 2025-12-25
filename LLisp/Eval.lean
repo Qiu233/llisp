@@ -57,7 +57,31 @@ unsafe def cdr : Value → EvalM Value
   | .symbol s => throw s!"{decl_name%}: cannot apply on symbol {s.name}"
   | .closure _ => throw s!"{decl_name%}: cannot apply on CLOSURE"
 
+unsafe def expr_repr : LexSExpr → Value
+  | .number x => Value.number x
+  | .str x => Value.str x
+  | .symbol s _ => Value.symbol s
+  | .internal_symbol s => Value.symbol s.toSymbol
+  | .list [] => Value.nil
+  | .list (head :: tail) => Value.cons (expr_repr head) (expr_repr (.list tail))
+
+unsafe def Value.mkQuote : Value → Value := fun v => Value.cons (Value.symbol InternalSymbol.quote.toSymbol) (Value.cons v Value.nil)
+
+unsafe def quote : LexSExpr → Value := fun v => Value.mkQuote (expr_repr v)
+
 mutual
+
+-- unsafe def expr_repr' : LexSExpr → EvalM Value
+--   | .number x => return Value.number x
+--   | .str x => return Value.str x
+--   | .symbol s _ => return Value.symbol s
+--   -- | .internal_symbol .unquote => throw "`unquote` expects datum"
+--   | .internal_symbol s => return Value.symbol s.toSymbol
+--   | .list [] => return Value.nil
+--   | .list (.internal_symbol .unquote :: body :: []) =>
+--     eval body
+--   | .list (.internal_symbol .unquote :: _) => throw s!"`unquote` expects 1 argument"
+--   | .list (head :: tail) => Value.cons <$> (expr_repr' head) <*> (expr_repr' (.list tail))
 
 unsafe  def eval_seq : List LexSExpr → EvalM Value := fun xs => do
   let mut ret_val := Value.nil
@@ -108,6 +132,9 @@ unsafe  def eval : LexSExpr → EvalM Value
     | .internal_symbol .quote =>
       let some q := tail[0]? | throw "`quote` expects 1 argument"
       return expr_repr q
+    | .internal_symbol .repr =>
+      let some q := tail[0]? | throw "`quote` expects 1 argument"
+      return (Value.cons (Value.symbol InternalSymbol.quote.toSymbol) (Value.cons (expr_repr q) Value.nil))
     | .internal_symbol .if =>
       let condition :: branch_true :: branch_false :: _ := tail | throw "`if` expects 3 arguments"
       if Value.is_false (← eval condition) then
@@ -194,6 +221,10 @@ unsafe  def eval : LexSExpr → EvalM Value
       let value' ← eval value
       set_local addr value'
       return Value.nil
+    | .internal_symbol .defun =>
+      let name :: args :: body := tail | throw "`defun` expects 2 arguments"
+      let LexSExpr.symbol _ _ := name | throw "The 1st argument of `defun` must be a symbol"
+      eval (.list [.internal_symbol .define, name, (.list (.internal_symbol .lambda :: args :: body))])
     | .internal_symbol .seq =>
       let (LexSExpr.number frameSize) :: body := tail | throw "invalid `seq`"
       assert! frameSize ≥ 0
@@ -266,14 +297,3 @@ unsafe def eval_prog_core : List SExpr → ExceptT String IO Value := fun e => d
   return r
 
 unsafe def eval_prog : List SExpr → IO (Except String Value) := eval_prog_core
-
-open LLisp.Quot
-
-def i := Sugar.desugar_list <| (Parser.run_parse_prog <| (unsafe unsafeIO (IO.FS.readFile "A.lisp")).toOption.get!).toOption.get!
-
-def r := Sugar.desugar_list (Parser.run_parse_prog "(symbol? 'a)").toOption.get!
-#eval r.toString
-
-#eval eval_prog i
-#eval i
-#eval (Parser.run_parse_prog <| (unsafe unsafeIO (IO.FS.readFile "A.lisp")).toOption.get!)

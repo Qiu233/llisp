@@ -45,21 +45,22 @@
         )
          ))
 
-(defun eval_unwrap (exp env) (car (eval exp env)))
+(defun eval* (exp env) (car (eval exp env)))
 
 ;; eval : exp -> env -> (value . env)
 (defun eval (exp env)
   (seq '()
   (cond
     ((num? exp)
-     (cons exp env))
+      (cons exp env))
 
     ((symbol? exp)
-     (cond ((eq? exp 'else) 0)
-           ((eq? exp 'true) 0)
-           ((eq? exp 'false) '())
-           (else (cons (lookup exp env) env))
-           ))
+      (cond ((eq? exp 'else) (cons 0 env))
+            ((eq? exp 'true) (cons 0 env))
+            ((eq? exp 'false) (cons '() env))
+            ((eq? exp 'layer) (cons 0 env))
+            (else (cons (lookup exp env) env))
+            ))
 
     ((pair? exp)
       (seq
@@ -67,21 +68,23 @@
         (cond
           ((symbol? head)
             (cond
-
               ((eq? head 'quote)
-              (cons (cadr exp) env))
+                (cons (cadr exp) env))
+              ((eq? head 'repr)
+                (cons (cons 'quote (cons (cadr exp) '())) env))
+              ((eq? head 'print)
+                (cons (print (eval* (cadr exp) env)) env))
 
               ((eq? head 'seq)
-              (eval_seq (cdr exp) env))
+                (eval_seq (cdr exp) env))
 
               ;; (define v val)
               ((eq? head 'define)
                 (seq
                   (define vname  (cadr exp))
-                  (define val    (eval_unwrap (caddr exp) env))
+                  (define val    (eval* (caddr exp) env))
                   (define env_   (cons (cons vname val) env))
-                  (cons '() env_)
-                  ))
+                  (cons '() env_)))
 
               ;; (defun f (x y) body1 body2)
               ((eq? head 'defun)
@@ -90,87 +93,82 @@
                   (define lam_body  (cddr exp))
                   (define val    (cons 'lambda lam_body))
                   (define env_   (cons (cons fname val) env))
-                  (cons '() env_)
-                  ))
+                  (cons '() env_)))
 
               ((eq? head 'lambda) (cons exp env)) ;; return directly
 
               ((and (eq? head 'and)
                     (pair? (cdr exp)))
-              (if (eval_unwrap (cadr exp) env)
-                  (if (eval_unwrap (caddr exp) env)
+              (if (eval* (cadr exp) env)
+                  (if (eval* (caddr exp) env)
                       (cons true env)
                       (cons false env))
                   (cons false env)))
 
-              ((and (eq? head 'if)
-                    (pair? (cdr exp))
+              ((and (eq? head 'if) (pair? (cdr exp))
                     (pair? (cddr exp)))
-              (if (eval_unwrap (cadr exp) env)
-                  (eval (caddr exp) env)
-                  (eval (cadddr exp) env)))
+                  (if (eval* (cadr exp) env)
+                        (eval (caddr exp) env)
+                        (eval (cadddr exp) env)))
 
               ((eq? head 'null?)
-              (cons (null? (eval_unwrap (cadr exp) env)) env))
+                (cons (null? (eval* (cadr exp) env)) env))
 
               ((eq? head 'error)
-              (error (eval_unwrap (cadr exp) env)))
+                (error (eval* (cadr exp) env)))
 
               ((eq? head 'pair?)
-              (cons (pair? (eval_unwrap (cadr exp) env)) env))
+                (cons (pair? (eval* (cadr exp) env)) env))
 
               ((eq? head 'symbol?)
-              (cons (symbol? (eval_unwrap (cadr exp) env)) env))
+                (cons (symbol? (eval* (cadr exp) env)) env))
 
               ((eq? head 'num?)
-              (cons (num? (eval_unwrap (cadr exp) env)) env))
+                (cons (num? (eval* (cadr exp) env)) env))
 
               ((eq? head 'atom?)
-              (cons (atom? (eval_unwrap (cadr exp) env)) env))
+                (cons (atom? (eval* (cadr exp) env)) env))
 
               ((eq? head 'eq?)
-              (cons (eq?
-                      (eval_unwrap (cadr exp) env)
-                      (eval_unwrap (caddr exp) env)) env))
+                (cons (eq?
+                      (eval* (cadr exp) env)
+                      (eval* (caddr exp) env)) env))
 
               ((eq? head 'car)
-              (cons (car (eval_unwrap (cadr exp) env)) env))
+                (cons (car (eval* (cadr exp) env)) env))
 
               ((eq? head 'cdr)
-              (cons (cdr (eval_unwrap (cadr exp) env)) env))
+                (cons (cdr (eval* (cadr exp) env)) env))
 
               ((eq? head 'cons)
-              (cons (cons
-                      (eval_unwrap (cadr exp) env)
-                      (eval_unwrap (caddr exp) env))
-                      env))
+                (cons (cons
+                      (eval* (cadr exp) env)
+                      (eval* (caddr exp) env)) env))
 
               ((eq? head 'cond)
-              (evcon (cdr exp) env))
+                (evcon (cdr exp) env))
 
               ((eq? head '+)
-              (cons (+
-                      (eval_unwrap (cadr exp) env)
-                      (eval_unwrap (caddr exp) env)) env))
+                (cons (+
+                      (eval* (cadr exp) env)
+                      (eval* (caddr exp) env)) env))
               ((eq? head '-)
-              (cons (-
-                      (eval_unwrap (cadr exp) env)
-                      (eval_unwrap (caddr exp) env)) env))
+                (cons (-
+                      (eval* (cadr exp) env)
+                      (eval* (caddr exp) env)) env))
               ((eq? head '*)
-              (cons (*
-                      (eval_unwrap (cadr exp) env)
-                      (eval_unwrap (caddr exp) env)) env))
+                (cons (*
+                      (eval* (cadr exp) env)
+                      (eval* (caddr exp) env)) env))
               ((eq? head '/)
-              (cons (/
-                      (eval_unwrap (cadr exp) env)
-                      (eval_unwrap (caddr exp) env)) env))
+                (cons (/
+                      (eval* (cadr exp) env)
+                      (eval* (caddr exp) env)) env))
 
               (else
-                (eval (cons (lookup head env) (cdr exp)) env))
-              ))
+                (eval (cons (lookup head env) (cdr exp)) env))))
 
-
-            ;; ((lambda (x y) body1 body2) a1 a2)
+          ;; ((lambda (x y) body1 body2) a1 a2)
           ((and (pair? head)
                 (eq? (caar exp) 'lambda))
             (seq
@@ -178,23 +176,20 @@
               (define body   (cddar exp))
               (define args   (evlis (cdr exp) env))
               (define env_   (pairlis params args env))
-              (eval_seq body env_))
-            )
-
+              (eval_seq body env_)))
           (else
             (error -3)))))
-
     (else
      (error -5)
      ))))
 
-;; (eval '(symbol? a) (cons (cons 'a 42) '() ))
+;; (eval* '(symbol? a) (cons (cons 'a 42) '() ))
 
-;; (eval '(seq (define x 1) x) '())
+;; (eval* '(seq (define x 1) x) '())
 
 ;; (- 1 2)
 
-;; (eval
+;; (eval*
 ;;   '(seq
 ;;     (define f
 ;;       (lambda (n)
@@ -203,7 +198,7 @@
 ;;     (f 3))
 ;;   '())
 
-(eval `(seq
+(eval* `(seq
   (defun f (x) (g x))
   (defun g (x) x)
   (f 1)

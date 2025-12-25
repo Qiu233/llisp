@@ -42,6 +42,7 @@ declare_internal_symbols% {
   quote,
   lambda,
   define,
+  defun,
   cons,
   car,
   cdr,
@@ -129,7 +130,7 @@ end
 
 unsafe def Value.toString : Value → String
   | .nil => "()"
-  | .cons (.symbol { name := "quote", .. }) y => s!"'{y.toString}"
+  | .cons (.symbol { name := "quote", .. }) (.cons y .nil) => s!"'{y.toString}"
   | .cons x .nil => s!"({x.toString})"
   | .cons x y =>
     Id.run do
@@ -179,18 +180,6 @@ unsafe def Frame.length : Frame → Nat := fun f =>
     p.length + 1
   else
     1
-
-unsafe def expr_repr : LexSExpr → Value
-  | .number x => Value.number x
-  | .str x => Value.str x
-  | .symbol s _ => Value.symbol s
-  | .internal_symbol s => Value.symbol s.toSymbol
-  | .list [] => Value.nil
-  | .list (head :: tail) => Value.cons (expr_repr head) (expr_repr (.list tail))
-
-unsafe def Value.mkQuote : Value → Value := fun v => Value.cons (Value.symbol InternalSymbol.quote.toSymbol) (Value.cons v Value.nil)
-
-unsafe def quote : LexSExpr → Value := fun v => Value.mkQuote (expr_repr v)
 
 unsafe def Value.const_true : Value := Value.number 0
 

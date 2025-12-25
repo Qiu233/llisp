@@ -102,9 +102,10 @@ private def parseDefineExpr : SExpr → ElabM (String × SExpr)
 
 /-- It is crucial that all symbols must be resolved statically, which means we cannot construct a symbol at runtime. -/
 private def internAllSymbols (e : SExpr) : ElabM Unit := do
-  let _ ← e.traverse fun x => do
+  let _ ← e.traverse (m := ElabM) fun x => do
     match x with
-    | .symbol s => discard <| internSymbol s
+    | .symbol s =>
+      discard <| internSymbol s
     | _ => pure ()
     return none
 
@@ -218,7 +219,9 @@ end
 
 def elaborate (program : List SExpr) : ExceptT String IO (List LexSExpr × Nat × Symbols) := do
   let initSymbols : Symbols := Symbols.new
-  let (r, s) ← StateRefT'.run (do internAllSymbols (SExpr.list program); elabSeq baseEnv program) initSymbols
+  let (r, s) ← StateRefT'.run (do
+    internAllSymbols (SExpr.list program)
+    elabSeq baseEnv program) initSymbols
   return (r.fst, r.snd.size!, s)
 
 end Elab

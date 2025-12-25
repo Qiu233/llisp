@@ -1,5 +1,15 @@
 {"version": "1.1.0",
  "packagesDir": ".lake/packages",
- "packages": [],
+ "packages":
+ [{"url": "https://github.com/Qiu233/DateTime.git",
+   "type": "git",
+   "subDir": null,
+   "scope": "",
+   "rev": "ad4c5c464a3acf6c606e596750409545cc074300",
+   "name": "DateTime",
+   "manifestFile": "lake-manifest.json",
+   "inputRev": null,
+   "inherited": false,
+   "configFile": "lakefile.lean"}],
  "name": "llisp",
  "lakeDir": ".lake"}

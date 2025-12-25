@@ -18,13 +18,15 @@ instance : ToString LLisp.SExpr where
   toString x := x.toString
 
 @[specialize]
-def LLisp.SExpr.traverse {m : Type → Type} [Monad m] (f : LLisp.SExpr → m (Option LLisp.SExpr)) : LLisp.SExpr → m LLisp.SExpr
+partial def LLisp.SExpr.traverse {m : Type → Type} [Monad m] (f : LLisp.SExpr → m (Option LLisp.SExpr)) : LLisp.SExpr → m LLisp.SExpr
   | e@(.number _)
   | e@(.symbol _)
   | e@(.str _) => (f e) <&> fun y => y.getD e
-  | .list xs => do
-    let ys ← xs.mapM (fun x => (f x) <&> fun y => y.getD x)
-    return .list ys
+  | e@(.list xs) => do
+    let r ← f e
+    r.getDM do
+      let ys ← xs.mapM (fun x => LLisp.SExpr.traverse f x)
+      return .list ys
 
 namespace LLisp.Parser
 
@@ -112,16 +114,16 @@ namespace Sugar
 
 mutual
 
-partial def desugar : SExpr → SExpr
+partial def expand_qq : SExpr → SExpr
   | .list [.symbol "quasiquote", inner] => expand_quasiquote inner
   | .list (.symbol "unquote" :: _) => panic! "unquote outside of quasiquote"
   | .list (.symbol "defun" :: name :: args :: body) =>
-    desugar <| .list [.symbol "define", name, .list (.symbol "lambda" :: args :: body) ]
-  | .list xs => .list (xs.map desugar)
+    expand_qq <| .list [.symbol "define", name, .list (.symbol "lambda" :: args :: body) ]
+  | .list xs => .list (xs.map expand_qq)
   | e => e
 
 partial def expand_quasiquote : SExpr → SExpr
-  | .list [.symbol "unquote", inner] => desugar inner
+  | .list [.symbol "unquote", inner] => inner
   | .list (.symbol "unquote" :: _) => panic! "unquote expects one argument"
   | .list xs => expand_quasiquote_list xs
   | e => .list [.symbol "quote", e]
@@ -132,6 +134,21 @@ partial def expand_quasiquote_list : List SExpr → SExpr
 
 end
 
-def desugar_list : List SExpr → List SExpr := List.map desugar
+partial def desugar : SExpr → SExpr := fun s => Id.run do s.traverse fun
+  | .list (.symbol "defun" :: name :: args :: body) =>
+    return expand_qq <| SExpr.list [.symbol "define", name, .list (.symbol "lambda" :: args :: body) ]
+  | x => return expand_qq x
+
+def desugar_list : List SExpr → List SExpr := fun s => s.map desugar
 
 end Sugar
+
+
+-- -- `(f (cons 'quote (cons ,a '())))
+def t : SExpr := SExpr.list [.symbol "quasiquote",
+  (.list [.symbol "cons", .list [.symbol "quote", .symbol "quote"], (.list [.symbol "cons", (.list [.symbol "unquote", .symbol "a"]), .list [.symbol "quote", .list []]])])
+]
+#eval t.toString
+#eval Sugar.desugar t |>.toString
+-- (cons 'f (cons (cons 'cons (cons 'quote (cons (cons 'cons (cons a (cons '() '()))) '()))) '()))
+-- (cons 'f '(cons 'cons (cons 'quote '(cons 'cons (cons a ''())))))
