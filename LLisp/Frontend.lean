@@ -3,6 +3,7 @@ import Std
 inductive LLisp.SExpr where
   | list : List SExpr → SExpr
   | number : Int → SExpr
+  | str : String → SExpr
   | symbol : String → SExpr
 deriving Repr, BEq, Inhabited
 
@@ -10,10 +11,20 @@ def LLisp.SExpr.toString : LLisp.SExpr → String
   | .list [.symbol "quote", body] => s!"'{body.toString}"
   | .list xs => s!"({String.intercalate " " (xs.map LLisp.SExpr.toString)})"
   | .number i => s!"{i}"
+  | .str i => s!"\"{i}\""
   | .symbol s => s
 
 instance : ToString LLisp.SExpr where
   toString x := x.toString
+
+@[specialize]
+def LLisp.SExpr.traverse {m : Type → Type} [Monad m] (f : LLisp.SExpr → m (Option LLisp.SExpr)) : LLisp.SExpr → m LLisp.SExpr
+  | e@(.number _)
+  | e@(.symbol _)
+  | e@(.str _) => (f e) <&> fun y => y.getD e
+  | .list xs => do
+    let ys ← xs.mapM (fun x => (f x) <&> fun y => y.getD x)
+    return .list ys
 
 namespace LLisp.Parser
 
@@ -38,16 +49,25 @@ def atom (s : String) : Parser Unit := do
 def is_symbol_char : Char → Bool := fun c =>
   Char.isAlphanum c || String.contains "-_?*+/<>=" c
 
-def symbol : Parser String := do
-  many1Chars (Std.Internal.Parsec.satisfy is_symbol_char)
+def symbol : Parser String := many1Chars (Std.Internal.Parsec.satisfy is_symbol_char)
+  -- let start ← satisfy Char.isAlphanum
+  -- let remaining ← many (Std.Internal.Parsec.satisfy is_symbol_char)
+  -- return String.ofList (start :: remaining.toList)
 
 def number : Parser Int := do
   let x ← peek!
   if x == '-' then
+    skip
     let n ← digits
     return -(Int.ofNat n)
   else
     digits
+
+def str : Parser String := do
+  _ ← skipChar '\"'
+  let r ← manyChars (Std.Internal.Parsec.satisfy fun x => x != '\"')
+  _ ← skipChar '\"'
+  return r
 
 mutual
 
@@ -71,6 +91,7 @@ partial def unquote : Parser SExpr := do
 
 partial def sexp : Parser SExpr := do
   attempt (SExpr.number <$> number)
+  <|> attempt (SExpr.str <$> str)
   <|> attempt (SExpr.symbol <$> symbol)
   <|> attempt (SExpr.list <$> list)
   <|> attempt (quote <&> fun q => SExpr.list [SExpr.symbol "quote", q])
@@ -80,7 +101,8 @@ partial def sexp : Parser SExpr := do
 end
 
 def parse_prog : Parser (List SExpr) := do
-  Array.toList <$> many (sexp <* ws)
+  Array.toList <$> (ws *> many (sexp <* ws))
+  -- Array.toList <$> (ws *> many (sexp <* ws <* eof))
 
 def run_parse_prog : String → Except String (List SExpr) := parse_prog.run
 

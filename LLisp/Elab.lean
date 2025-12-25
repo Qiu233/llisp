@@ -73,11 +73,47 @@ private def bindParams (params : List SExpr) : ElabM (Scope × List LexSExpr) :=
     acc := LexSExpr.symbol sym { depth := 0, index := idx } :: acc
   return (scope, acc.reverse)
 
+private def isDefineForm : SExpr → Bool
+  | .list (.symbol name :: _) => internalSymbol? name == some .define
+  | _ => false
+
+private def parseDefineArgs (args : List SExpr) : ElabM (String × SExpr) := do
+  let some nameS := args[0]? | throw s!"{decl_name%}: `define` expects a target symbol"
+  let some valueS := args[1]? | throw s!"{decl_name%}: `define` expects a value"
+  let name ←
+    match nameS with
+    | .symbol s => pure s
+    | _ => throw s!"{decl_name%}: `define` target must be a symbol"
+  return (name, valueS)
+
+private def spanDefineBlock : List SExpr → (List SExpr × List SExpr)
+  | [] => ([], [])
+  | expr :: rest =>
+    if isDefineForm expr then
+      let (defs, tail) := spanDefineBlock rest
+      (expr :: defs, tail)
+    else
+      ([], expr :: rest)
+
+private def parseDefineExpr : SExpr → ElabM (String × SExpr)
+  | .list (.symbol _ :: args) => parseDefineArgs args
+  | _ => throw s!"{decl_name%}: `define` expects a list"
+
+
+/-- It is crucial that all symbols must be resolved statically, which means we cannot construct a symbol at runtime. -/
+private def internAllSymbols (e : SExpr) : ElabM Unit := do
+  let _ ← e.traverse fun x => do
+    match x with
+    | .symbol s => discard <| internSymbol s
+    | _ => pure ()
+    return none
+
 mutual
 
 private partial def elabExpr (env : Env) (phase : Phase) (expr : SExpr) : ElabM (LexSExpr × Env) := do
   match expr with
   | .number n => return (.number n, env)
+  | .str n => return (.str n, env)
   | .symbol name =>
     match phase with
     | .literal =>
@@ -102,6 +138,10 @@ private partial def elabExpr (env : Env) (phase : Phase) (expr : SExpr) : ElabM 
         match first with
         | .symbol headName =>
           match internalSymbol? headName with
+          | some InternalSymbol.seq =>
+            let mut scope := emptyScope
+            let (bodyLex, env') ← elabSeq (scope :: env) rest
+            return (.list ((LexSExpr.internal_symbol .seq) :: (LexSExpr.number env'.size!) :: bodyLex), env)
           | some InternalSymbol.quote =>
             let some arg := rest[0]?
               | throw s!"{decl_name%}: `quote` expects 1 argument"
@@ -120,12 +160,7 @@ private partial def elabExpr (env : Env) (phase : Phase) (expr : SExpr) : ElabM 
               return (.list (lam :: (LexSExpr.number env'.size!) :: LexSExpr.list argLex :: bodyLex), env)
             | [] => throw s!"{decl_name%}: lambda expects a parameter list"
           | some InternalSymbol.define =>
-            let some nameS := rest[0]? | throw s!"{decl_name%}: `define` expects a target symbol"
-            let some valueS := rest[1]? | throw s!"{decl_name%}: `define` expects a value"
-            let name ←
-              match nameS with
-              | .symbol s => pure s
-              | _ => throw s!"{decl_name%}: `define` target must be a symbol"
+            let (name, valueS) ← parseDefineArgs rest
             let (env', sym, addr) ← bindDefine env name
             let (valueLex, _) ← elabExpr env' .expr valueS
             let head := LexSExpr.internal_symbol InternalSymbol.define
@@ -143,13 +178,34 @@ private partial def elabExpr (env : Env) (phase : Phase) (expr : SExpr) : ElabM 
           let tail ← mapInMode env .expr rest
           return (.list (head :: tail), env)
 
+private partial def elabDefineBlock (env : Env) (defs : List SExpr) : ElabM (List LexSExpr × Env) := do
+  let parsed ← defs.mapM parseDefineExpr
+  let rec bindAll (env : Env) (acc : List (Symbol × LexAddr × SExpr)) : List (String × SExpr) →
+      ElabM (Env × List (Symbol × LexAddr × SExpr))
+    | [] => return (env, acc.reverse)
+    | (name, value) :: rest => do
+        let (env', sym, addr) ← bindDefine env name
+        bindAll env' ((sym, addr, value) :: acc) rest
+  let (env', entries) ← bindAll env [] parsed
+  let head := LexSExpr.internal_symbol InternalSymbol.define
+  let lexDefs ← entries.mapM fun (sym, addr, value) => do
+    let (valueLex, _) ← elabExpr env' .expr value
+    return LexSExpr.list [head, LexSExpr.symbol sym addr, valueLex]
+  return (lexDefs, env')
+
 private partial def elabSeq (env : Env) (prog : List SExpr) : ElabM (List LexSExpr × Env) := do
   match prog with
   | [] => return ([], env)
   | expr :: rest =>
-    let (current, env') ← elabExpr env .expr expr
-    let (tail, env'') ← elabSeq env' rest
-    return (current :: tail, env'')
+    if isDefineForm expr then
+      let (defineBlock, tail) := spanDefineBlock (expr :: rest)
+      let (defsLex, env') ← elabDefineBlock env defineBlock
+      let (tailLex, env'') ← elabSeq env' tail
+      return (defsLex ++ tailLex, env'')
+    else
+      let (current, env') ← elabExpr env .expr expr
+      let (tail, env'') ← elabSeq env' rest
+      return (current :: tail, env'')
 
 private partial def mapInMode (env : Env) (phase : Phase) : List SExpr → ElabM (List LexSExpr)
   | [] => return []
@@ -162,7 +218,7 @@ end
 
 def elaborate (program : List SExpr) : ExceptT String IO (List LexSExpr × Nat × Symbols) := do
   let initSymbols : Symbols := Symbols.new
-  let (r, s) ← StateRefT'.run (elabSeq baseEnv program) initSymbols
+  let (r, s) ← StateRefT'.run (do internAllSymbols (SExpr.list program); elabSeq baseEnv program) initSymbols
   return (r.fst, r.snd.size!, s)
 
 end Elab

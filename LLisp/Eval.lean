@@ -4,59 +4,68 @@ import LLisp.Quot
 
 namespace LLisp
 
-abbrev EvalM := ExceptT String <| ReaderT Symbols <| StateM Frame
+unsafe abbrev EvalM := ExceptT String <| ReaderT Symbols <| StateRefT (IO.Ref Frame) IO
 
-def lookup! : LexAddr → EvalM Value := fun addr => do
-  let frame ← getThe Frame
+unsafe def getFrame : EvalM Frame := do
+  let frame ← get
+  frame.get
+
+unsafe def lookup! : LexAddr → EvalM Value := fun addr => do
+  let frame ← getFrame
   let mut f := frame
   for _ in [0:addr.depth] do
     f ← f.parent?.getDM (throw "depth exhausted")
   f.locals[addr.index]?.getDM (throw "local index out of bounds")
 
 -- TODO: find a way to modify ancestor frames
-def set_local : LexAddr → Value → EvalM Unit := fun addr val => do
+unsafe def set_local : LexAddr → Value → EvalM Unit := fun addr val => do
   if addr.depth > 0 then
     throw s!"{decl_name%}: cannot write to non-local definition"
-  let f ← getThe Frame
+  let fv ← get
+  let f ← fv.get
   if f.locals.size ≤ addr.index then
     panic! "impossible"
-  modifyThe Frame (fun f => { f with locals := f.locals.set! addr.index val })
+  fv.modify (fun f => { f with locals := f.locals.set! addr.index val })
 
-def push_frame (size : Nat) (args : List Value) : EvalM Unit := do
-  let frame ← getThe Frame
+unsafe def push_frame (size : Nat) (args : List Value) : EvalM Unit := do
+  let fv ← get
+  let frame ← fv.get
   let locals : Array Value := args.toArray ++ Array.replicate (size - args.length) Value.nil
-  let frame' := { parent? := frame, locals }
-  set (σ := Frame) frame'
+  let frame' := { parent? := frame, locals : Frame }
+  set (← IO.mkRef frame')
 
-def pop_frame! : EvalM Frame := do
-  let frame ← getThe Frame
+unsafe def pop_frame! : EvalM Frame := do
+  let fv ← get
+  let frame ← fv.get
   let some parent := frame.parent? | panic! s!"parent does not exist"
-  set (σ := Frame) parent
+  set (← IO.mkRef parent)
   return frame
 
-def car : Value → EvalM Value
+unsafe def car : Value → EvalM Value
   | .cons x _ => return x
   | .nil => throw s!"{decl_name%}: cannot apply on NIL"
   | .number _ => throw s!"{decl_name%}: cannot apply on NUMBER"
+  | .str _ => throw s!"{decl_name%}: cannot apply on STRING"
   | .symbol s => throw s!"{decl_name%}: cannot apply on symbol {s.name}"
   | .closure _ => throw s!"{decl_name%}: cannot apply on CLOSURE"
 
-def cdr : Value → EvalM Value
+unsafe def cdr : Value → EvalM Value
   | .cons _ y => return y
   | .nil => throw s!"{decl_name%}: cannot apply on NIL"
   | .number _ => throw s!"{decl_name%}: cannot apply on NUMBER"
+  | .str _ => throw s!"{decl_name%}: cannot apply on STRING"
   | .symbol s => throw s!"{decl_name%}: cannot apply on symbol {s.name}"
   | .closure _ => throw s!"{decl_name%}: cannot apply on CLOSURE"
 
 mutual
 
-partial def eval_seq : List LexSExpr → EvalM Value := fun xs => do
+unsafe  def eval_seq : List LexSExpr → EvalM Value := fun xs => do
   let mut ret_val := Value.nil
   for code in xs do
     ret_val ← eval code
   return ret_val
 
-partial def eval' : Value → List LexSExpr → EvalM Value := fun f tail => do
+unsafe  def eval' : Value → List LexSExpr → EvalM Value := fun f tail => do
   match f with
   | .symbol s =>
     if s.isInternal then
@@ -67,26 +76,38 @@ partial def eval' : Value → List LexSExpr → EvalM Value := fun f tail => do
       throw s!"{decl_name%}: internal error: symbol at head position cannot evaluate to non-internal symbol"
   | .closure c =>
     if tail.length ≠ c.num_args then
-      throw "wrong number of arguments are passed"
+      throw s!"wrong number of arguments are passed, expected {c.num_args}, but got {tail.length}"
     let args ← tail.mapM eval
-    let old ← getThe Frame
-    set (σ := Frame) c.enclosing
+    -- let old ← getThe Frame
+    let old ← get
+    set c.enclosing
     push_frame c.frame_size args
     let ret_val ← eval_seq c.seq.toList
-    set (σ := Frame) old
+    set old
     return ret_val
-  | _ => throw "invalid head"
+  | h => throw s!"invalid head: {h}"
 
-partial def eval : LexSExpr → EvalM Value
+unsafe  def eval : LexSExpr → EvalM Value
   | .number x => return Value.number x
-  | .symbol s addr => lookup! addr
+  | .str x => return Value.str x
+  | .symbol s addr =>
+    if !s.isInternal then
+      lookup! addr
+    else
+      eval (LexSExpr.internal_symbol (InternalSymbol.of_uid s.uid))
+  | .internal_symbol (.else) =>
+    return Value.const_true
+  | .internal_symbol (.true) =>
+    return Value.const_true
+  | .internal_symbol (.false) =>
+    return Value.const_false
   | .internal_symbol s => return Value.symbol s.toSymbol
   | .list [] => return Value.nil
   | expr@(.list (head :: tail)) => do
     match head with
     | .internal_symbol .quote =>
       let some q := tail[0]? | throw "`quote` expects 1 argument"
-      eval q
+      return expr_repr q
     | .internal_symbol .if =>
       let condition :: branch_true :: branch_false :: _ := tail | throw "`if` expects 3 arguments"
       if Value.is_false (← eval condition) then
@@ -156,9 +177,15 @@ partial def eval : LexSExpr → EvalM Value
       match x' with
       | .number .. => return Value.const_true
       | _ => return Value.const_false
+    | .internal_symbol .symbol? =>
+      let some x := tail[0]? | throw "`symbol?` expects 1 argument"
+      let x' ← eval x
+      match x' with
+      | .symbol .. => return Value.const_true
+      | _ => return Value.const_false
     | .internal_symbol .lambda =>
       let (frame_size, args, xs) := LexSExpr.lambda! expr
-      let enclosing ← getThe Frame
+      let enclosing ← get
       let c : Closure := { seq := xs.toArray, enclosing, num_args := args.length, frame_size }
       return Value.closure c
     | .internal_symbol .define =>
@@ -167,181 +194,86 @@ partial def eval : LexSExpr → EvalM Value
       let value' ← eval value
       set_local addr value'
       return Value.nil
-    | .internal_symbol .seq => eval_seq tail
+    | .internal_symbol .seq =>
+      let (LexSExpr.number frameSize) :: body := tail | throw "invalid `seq`"
+      assert! frameSize ≥ 0
+      let old ← get
+      push_frame frameSize.toNat []
+      let res ← eval_seq body
+      set old
+      return res
     | .internal_symbol .error =>
       let x :: _ := tail | throw "`error` expects 1 arguments"
-      let LexSExpr.number x := x | throw "argument of `error` must be a number"
+      -- let LexSExpr.number x := x | throw "argument of `error` must be a number"
+      let x ← eval x
       throw s!"user error: {x}"
-    | .internal_symbol .else =>
-      return Value.const_true
-    | .internal_symbol .true =>
-      return Value.const_true
-    | .internal_symbol .false =>
-      return Value.const_false
-    | .symbol sym addr =>
-      let f ← lookup! addr
-      eval' f tail
+    | .internal_symbol .print =>
+      let x :: _ := tail | throw "`print` expects 1 arguments"
+      let x ← eval x
+      println! s!"{x}"
+      return Value.nil
+    | .internal_symbol .symbol_name =>
+      let x :: _ := tail | throw "`symbol_name` expects 1 arguments"
+      let x ← eval x
+      match x with
+      | .symbol s => return Value.str s.name
+      | _ => throw "`symbol_name` expects a symbol"
+    | .internal_symbol .add =>
+      let x :: y :: _ := tail | throw "`add` expects 2 arguments"
+      let x' ← eval x
+      let y' ← eval y
+      match x', y' with
+      | .number x', .number y' => return .number (x' + y')
+      | _, _ => throw "`add` expects 2 NUMBERs"
+    | .internal_symbol .sub =>
+      let x :: y :: _ := tail | throw "`sub` expects 2 arguments"
+      let x' ← eval x
+      let y' ← eval y
+      match x', y' with
+      | .number x', .number y' => return .number (x' - y')
+      | _, _ => throw "`sub` expects 2 NUMBERs"
+    | .internal_symbol .mul =>
+      let x :: y :: _ := tail | throw "`mul` expects 2 arguments"
+      let x' ← eval x
+      let y' ← eval y
+      match x', y' with
+      | .number x', .number y' => return .number (x' * y')
+      | _, _ => throw "`mul` expects 2 NUMBERs"
+    | .internal_symbol .div =>
+      let x :: y :: _ := tail | throw "`div` expects 2 arguments"
+      let x' ← eval x
+      let y' ← eval y
+      match x', y' with
+      | .number x', .number y' => return .number (x' / y')
+      | _, _ => throw "`div` expects 2 NUMBERs"
+    | .internal_symbol s@(.else)
+    | .internal_symbol s@(.true)
+    | .internal_symbol s@(.false) =>
+      throw s!"symbol {s} is not intended to be used here"
+    | .symbol ..
     | .list _ =>
       let f ← eval head
       eval' f tail
-    | .number _ =>
+    | .number _
+    | .str _ =>
       throw s!"{decl_name%}: invalid head"
 
 end
 
-def eval_prog_core : List SExpr → ExceptT String IO Value := fun e => do
+unsafe def eval_prog_core : List SExpr → ExceptT String IO Value := fun e => do
   let (seq, frameSize, symbols) ← Elab.elaborate e
-  let r ← eval_seq seq symbols |>.run' { parent? := none, locals := Array.replicate frameSize Value.nil }
-  r
+  let r ← eval_seq seq symbols |>.run' (← IO.mkRef { parent? := none, locals := Array.replicate frameSize Value.nil })
+  return r
 
-def eval_prog : List SExpr → IO (Except String Value) := eval_prog_core
+unsafe def eval_prog : List SExpr → IO (Except String Value) := eval_prog_core
 
 open LLisp.Quot
 
-def e := Sugar.desugar_list llisp_seq% { (define a null?) (define b (lambda (x) (seq (a x)) )  ) (b `()) }
+def i := Sugar.desugar_list <| (Parser.run_parse_prog <| (unsafe unsafeIO (IO.FS.readFile "A.lisp")).toOption.get!).toOption.get!
 
-def i := Sugar.desugar_list llisp_seq% {
-
-(defun caar (xs) (car (car xs)))
-(defun cdar (xs) (cdr (car xs)))
-(defun cddr (xs) (cdr (cdr xs)))
-(defun cddar (xs) (cdr (cdr (car xs))))
-(defun cadar (xs) (car (cdr (car xs))))
-(defun caddar (xs) (car (cdr (cdr (car xs)))))
-(defun cadddr (xs) (car (cdr (cdr (cdr xs)))))
-(defun caddr (xs) (car (cdr (cdr xs))))
-(defun cadr (xs) (car (cdr xs)))
-
-(defun lookup (x env)
-  (cond ((null? env) (error -1))
-        ((eq? x (caar env)) (cdar env))
-        (else (lookup x (cdr env)))))
-
-(defun pairlis (xs ys env)
-  (if (null? xs)
-      env
-      (cons (cons (car xs) (car ys))
-            (pairlis (cdr xs) (cdr ys) env))))
-
-(defun isvar (x) (and (pair? x) (eq? (car x) `var)))
-
-(defun evlis (exps env)
-  (if (null? exps)
-      `()
-      (cons (eval (car exps) env)
-            (evlis (cdr exps) env))))
-
-(defun evcon (clauses env)
-  (cond ((null? clauses) (error -2))
-        ((eval (caar clauses) env)
-         (eval (cadar clauses) env))
-        (else
-         (evcon (cdr clauses) env))))
-
-(defun eval (exp env)
-  (cond
-    ((num exp)
-     exp)
-
-    ((isvar exp)
-     (lookup (cadr exp) env))
-
-    ((symbol? exp)
-     (cond ((eq? exp `else) 0)
-           ((eq? exp `true) 0)
-           ((eq? exp `false) `())
-           (else (error -3))))
-
-    ((pair? exp)
-     (cond
-
-       ((symbol? (car exp))
-        (cond
-
-          ((eq? (car exp) `quote)
-           (cadr exp))
-
-          ((and (eq? (car exp) `and)
-                (pair? (cdr exp)))
-           (if (eval (cadr exp) env)
-               (if (eval (caddr exp) env)
-                   true
-                   false)
-               false))
-
-          ((and (eq? (car exp) `if)
-                (pair? (cdr exp))
-                (pair? (cddr exp)))
-           (if (eval (cadr exp) env)
-               (eval (caddr exp) env)
-               (eval (cadddr exp) env)))
-
-          ((eq? (car exp) `null?)
-           (null? (eval (cadr exp) env)))
-
-          ((eq? (car exp) `error)
-           (error (eval (cadr exp) env)))
-
-          ((eq? (car exp) `pair?)
-           (pair? (eval (cadr exp) env)))
-
-          ((eq? (car exp) `symbol?)
-           (symbol? (eval (cadr exp) env)))
-
-          ((eq? (car exp) `num?)
-           (num (eval (cadr exp) env)))
-
-          ((eq? (car exp) `atom?)
-           (atom? (eval (cadr exp) env)))
-
-          ((eq? (car exp) `eq?)
-           (eq? (eval (cadr exp) env)
-                (eval (caddr exp) env)))
-
-          ((eq? (car exp) `car)
-           (car (eval (cadr exp) env)))
-
-          ((eq? (car exp) `cdr)
-           (cdr (eval (cadr exp) env)))
-
-          ((eq? (car exp) `cons)
-           (cons (eval (cadr exp) env)
-                 (eval (caddr exp) env)))
-
-          ((eq? (car exp) `cond)
-           (evcon (cdr exp) env))
-
-          (else
-           (error -3))))
-
-       ((isvar (car exp))
-        (eval (cons (lookup (cadar exp) env)
-                     (cdr exp))
-               env))
-
-       ((and (pair? (car exp))
-             (eq? (caar exp) `lambda))
-        (define params (cadar exp))
-        (define body   (caddar exp))
-        (define args   (evlis (cdr exp) env))
-        (define env_   (pairlis params args env))
-        (eval body env_))
-
-       ((and (pair? (car exp))
-             (eq? (caar exp) `define))
-        (define vname  (cadar exp))
-        (define val    (eval (caddar exp) env))
-        (define env_   (cons (cons vname val) env))
-        (eval (cadr exp) env_))
-
-       (else
-        (error -3))))
-
-    (else
-     (error -3)
-     )))
-
-(eval `1 `())
-}
+def r := Sugar.desugar_list (Parser.run_parse_prog "(symbol? 'a)").toOption.get!
+#eval r.toString
 
 #eval eval_prog i
+#eval i
+#eval (Parser.run_parse_prog <| (unsafe unsafeIO (IO.FS.readFile "A.lisp")).toOption.get!)

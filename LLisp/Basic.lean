@@ -13,7 +13,7 @@ private syntax internal_symbol_entry := rawIdent (" => " str)?
 set_option hygiene false
 
 local
-elab "declare_internal_symbols%" "{" es:internal_symbol_entry,* "}" : command => do
+elab "declare_internal_symbols%" "{" es:internal_symbol_entry,*,? "}" : command => do
   let es := es.getElems.map fun x => match x with | `(internal_symbol_entry| $name $[=> $str]?) => (name, str) | _ => panic! "impossible"
   let ts ← es.mapM fun (x, _) => `(Parser.Command.ctor| | $x:ident)
   let type ← `(inductive InternalSymbol where $ts* deriving Repr, BEq, Inhabited)
@@ -52,11 +52,18 @@ declare_internal_symbols% {
   pair?,
   atom?,
   num?,
+  symbol?,
   error,
   else,
   and,
   true,
-  false
+  false,
+  print,
+  symbol_name,
+  sub => "-",
+  add => "+",
+  mul => "*",
+  div => "/",
 }
 
 end
@@ -90,33 +97,60 @@ deriving Repr, BEq, Inhabited
 inductive LexSExpr where
   | list : List LexSExpr → LexSExpr
   | number : Int → LexSExpr
+  | str : String → LexSExpr
   | internal_symbol : InternalSymbol → LexSExpr
   | symbol : Symbol → LexAddr → LexSExpr
 deriving Repr, BEq, Inhabited
 
 mutual
 
-inductive Value where
+unsafe inductive Value where
   | nil : Value
   | cons : Value → Value → Value
   | number : Int → Value
+  | str : String → Value
   | symbol : Symbol → Value
   | closure : Closure → Value
-deriving Repr, BEq, Inhabited
+-- deriving Repr, BEq, Inhabited
 
-structure Frame where
+unsafe structure Frame where
   parent? : Option Frame
   locals : Array Value
-deriving Repr, BEq, Inhabited
+-- deriving Repr, BEq, Inhabited
 
-structure Closure where
+unsafe structure Closure where
   num_args : Nat
   frame_size : Nat
   seq : Array LexSExpr
-  enclosing : Frame
-deriving Repr, BEq, Inhabited
+  enclosing : IO.Ref Frame
+-- deriving Repr, BEq, Inhabited
 
 end
+
+unsafe def Value.toString : Value → String
+  | .nil => "()"
+  | .cons (.symbol { name := "quote", .. }) y => s!"'{y.toString}"
+  | .cons x .nil => s!"({x.toString})"
+  | .cons x y =>
+    Id.run do
+      let mut y := y
+      let mut r := #[x.toString]
+      while true do
+        if let Value.cons a b := y then
+          r := r.push a.toString
+          y := b
+        else break
+      if y matches .nil then
+        return s!"({String.intercalate " " r.toList})"
+      else
+        return s!"({String.intercalate " " r.toList} . {y.toString})"
+  | .number x => s!"{x}"
+  | .str x => s!"\"{x}\""
+  | .symbol x => s!"{x.name}"
+  | .closure c => s!"PROCEDURE@{c.num_args}"
+
+unsafe instance : ToString Value where
+  toString x := x.toString
 
 structure Symbols where
   private mk' ::
@@ -140,36 +174,38 @@ def Symbols.push : Symbols → String → (Symbol × Symbols) := fun symbols nam
 --     f := f.parent?.getD (panic! "depth exhausted")
 --   f.locals[addr.index]?.getD (panic! "local index out of bounds")
 
-partial def Frame.length : Frame → Nat := fun f =>
+unsafe def Frame.length : Frame → Nat := fun f =>
   if let some p := f.parent? then
     p.length + 1
   else
     1
 
-def expr_repr : LexSExpr → Value
+unsafe def expr_repr : LexSExpr → Value
   | .number x => Value.number x
+  | .str x => Value.str x
   | .symbol s _ => Value.symbol s
   | .internal_symbol s => Value.symbol s.toSymbol
   | .list [] => Value.nil
   | .list (head :: tail) => Value.cons (expr_repr head) (expr_repr (.list tail))
 
-def Value.mkQuote : Value → Value := fun v => Value.cons (Value.symbol InternalSymbol.quote.toSymbol) (Value.cons v Value.nil)
+unsafe def Value.mkQuote : Value → Value := fun v => Value.cons (Value.symbol InternalSymbol.quote.toSymbol) (Value.cons v Value.nil)
 
-def quote : LexSExpr → Value := fun v => Value.mkQuote (expr_repr v)
+unsafe def quote : LexSExpr → Value := fun v => Value.mkQuote (expr_repr v)
 
-def Value.const_true : Value := Value.number 0
+unsafe def Value.const_true : Value := Value.number 0
 
-def Value.const_false : Value := Value.nil
+unsafe def Value.const_false : Value := Value.nil
 
-def Value.is_false : Value → Bool := fun v => v == Value.const_false
-
-def Value.veq : Value → Value → Bool
+unsafe def Value.veq : Value → Value → Bool
   | .nil, .nil => true
   | .symbol x, .symbol y => x == y
   | .number x, .number y => x == y
+  | .str x, .str y => x == y
   | _, _ => false
 
-def LexSExpr.lambda! : LexSExpr → Nat × List (Symbol × LexAddr) × List LexSExpr := fun expr => Id.run do
+unsafe def Value.is_false : Value → Bool := fun v => Value.veq v Value.const_false
+
+unsafe def LexSExpr.lambda! : LexSExpr → Nat × List (Symbol × LexAddr) × List LexSExpr := fun expr => Id.run do
   let LexSExpr.list (LexSExpr.internal_symbol InternalSymbol.lambda :: ts) := expr | panic! s!"not a lambda"
   let fail : ∀ {α} [Inhabited α], Unit → α := fun () => panic! s!"invalid lambda construct"
   let (LexSExpr.number frameSize) :: (LexSExpr.list args) :: xs := ts | fail ()
